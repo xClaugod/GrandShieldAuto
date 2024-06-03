@@ -1,0 +1,25 @@
+# Utilizza un'immagine base con Spark pre-installato
+FROM apache/spark:latest
+
+# Passa all'utente root per installare pacchetti aggiuntivi
+USER root
+
+# Aggiorna pip e installa le librerie Python necessarie
+RUN pip3 install --upgrade pip && \
+    pip3 install pyspark && \
+    pip3 install redis
+
+# Installa gli strumenti di linea di comando di Redis
+RUN apt-get update && apt-get install -y redis-tools
+
+# Aggiungi il percorso di Spark al PATH
+ENV PATH="${PATH}:/opt/apache/spark/bin"
+
+# Copia il codice dell'applicazione nell'immagine
+COPY ./script.py /opt/spark_app/script.py
+
+# Imposta la directory di lavoro
+WORKDIR /opt/spark_app
+
+# Avvia l'applicazione
+CMD ["spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,com.redislabs:spark-redis_2.12:3.0.0", "--master", "local[*]", "script.py"]
