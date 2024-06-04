@@ -45,15 +45,6 @@ services:
       echo -e 'Successfully created the following topics:'
       kafka-topics --bootstrap-server PLAINTEXT://kafka:9092 --list
       "
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    ports:
-      - 8080:8080
-    depends_on:
-      - kafka
-    environment:
-      - KAFKA_CLUSTERS_0_NAME=local
-      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=PLAINTEXT://kafka:9092
   redis-host:
     image: redis:latest
     ports:

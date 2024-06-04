@@ -23,8 +23,6 @@ def haversine(lat1, lon1, lat2, lon2):
 # Calcolare la distanza e segnalarla se supera i 30 metri
 def process_new_data(input_df, epoch_id):
     print("sono dengtro peroces_",input_df)
-    print("Schema del DataFrame di input:")
-    input_df.printSchema()
     schema = StructType().add("latitude", DoubleType()).add("longitude", DoubleType())
     
     # Leggere i dati da Redis in un DataFrame separato
@@ -74,6 +72,18 @@ def process_new_data(input_df, epoch_id):
         print("La prima latitudine è:", first_latitude)
         print("La prima longitudine è:", first_longitude)
 
+        if key.decode('utf-8').startswith("stolen:"):
+        # Recupera tutti i campi e valori dell'hash
+            hash_values = redis_client.hgetall(key)
+            
+            # Converti i valori da byte a stringa
+            decoded_values = {k.decode('utf-8'): v.decode('utf-8') for k, v in hash_values.items()}
+            matching_hashes.append((key.decode('utf-8'), decoded_values))
+
+    stolen = False
+
+    if matching_hashes[0] :
+        stolen = True
     rows = input_df.select("latitude", "longitude").collect()
 
     
@@ -85,7 +95,7 @@ def process_new_data(input_df, epoch_id):
             distance = haversine(float(first_latitude), float(first_longitude), float(latitude), float(longitude))
             print(f"La coppia {first_latitude},{first_longitude} con la coppia {latitude},{longitude} distano: {distance}")
             
-            if distance > 30:
+            if distance > 30 or stolen == True:
                 print(f"Salvataggio della coordinata su Redis: {latitude}, {longitude}")
                 
                 # Creare una chiave unica per ogni coppia di coordinate
@@ -96,6 +106,14 @@ def process_new_data(input_df, epoch_id):
                 redis_client.hset(f"{index}:{unique_key}", mapping={
                     "latitude": latitude,
                     "longitude": longitude
+                })
+
+                unique_key = "stolen"
+                
+                # Salvare la coordinata su Redis
+                
+                redis_client.hset(unique_key, mapping={
+                    "stolen": "True",
                 })
                 index += 1
     else:
