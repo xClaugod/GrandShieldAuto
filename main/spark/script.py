@@ -1,4 +1,4 @@
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession,DataFrameWriter
 from pyspark.sql import functions as F
 from pyspark.sql.functions import from_json, col, lit
 from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
@@ -88,6 +88,19 @@ def process_new_data(input_df, epoch_id):
                 "longitude": longitude,
                 "timestamp": str(timestamp)
             })
+            es_df = spark.createDataFrame([
+                {
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "timestamp": str(timestamp),
+                }
+            ])
+
+            # Invia il DataFrame a Elasticsearch
+            es_df.write.format("org.elasticsearch.spark.sql")\
+                .option("es.resource", "location-data")\
+                .mode("append")\
+                .save()
 
         return
     
@@ -156,6 +169,35 @@ def process_new_data(input_df, epoch_id):
                     redis_client.hset(unique_key, mapping={
                         "stolen": "True",
                     })
+
+                    es_df = spark.createDataFrame([
+                        {
+                            "latitude": latitude,
+                            "longitude": longitude,
+                            "timestamp": str(last_timestamp.timestamp()),
+                        }
+                    ])
+
+                    # Invia il DataFrame a Elasticsearch
+                    es_df.write.format("org.elasticsearch.spark.sql")\
+                        .option("es.resource", "location-data")\
+                        .mode("append")\
+                        .save()
+
+                    es_df = spark.createDataFrame([
+                        {
+                            "speed": speed,
+                            "direction": direction
+                        }
+                    ])
+
+                    # Invia il DataFrame a Elasticsearch
+                    es_df.write.format("org.elasticsearch.spark.sql")\
+                        .option("es.resource", "location-data-stats")\
+                        .mode("append")\
+                        .save()
+
+                    
                     index += 1
             else:
                 print(f"Nessuna history trovata, salvataggio della coordinata iniziale su Redis: {latitude}, {longitude}, {last_timestamp}")
@@ -174,6 +216,11 @@ spark = SparkSession.builder \
     .appName("KafkaSparkStreaming") \
     .config("spark.redis.host", "redis-host") \
     .config("spark.redis.port", "6379") \
+    .config("es.nodes", "elasticsearch") \
+    .config("es.port", "9200") \
+    .config("es.index.auto.create", "true") \
+    .config("es.net.ssl", "false") \
+    .config("es.nodes.wan.only", "true") \
     .getOrCreate()
 
 # Configurazione del client Redis in Python
@@ -206,5 +253,6 @@ df = df.withColumn("latitude", col("latitude").cast(DoubleType())) \
 df.writeStream \
     .foreachBatch(process_new_data) \
     .start()
+
 
 spark.streams.awaitAnyTermination()

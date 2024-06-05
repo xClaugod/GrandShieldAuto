@@ -23,4 +23,4 @@ COPY ./script.py /opt/spark_app/script.py
 WORKDIR /opt/spark_app
 
 # Avvia l'applicazione
-CMD ["spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,com.redislabs:spark-redis_2.12:3.0.0", "--master", "local[*]", "script.py"]
+CMD ["spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,com.redislabs:spark-redis_2.12:3.0.0,org.elasticsearch:elasticsearch-spark-30_2.12:8.2.0", "--master", "local[*]", "script.py"]
