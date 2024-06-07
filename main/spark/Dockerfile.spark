@@ -18,9 +18,9 @@ RUN apt-get update && apt-get install -y redis-tools
 # Aggiungi il percorso di Spark al PATH
 ENV PATH="${PATH}:/opt/apache/spark/bin"
 
-# Copia il codice dell'applicazione nell'immagine
+# Copia il codice dell'applicazione e il file .env nell'immagine
 COPY ./script.py /opt/spark_app/script.py
-
+COPY .env /opt/spark_app/.env
 
 # Imposta la directory di lavoro
 WORKDIR /opt/spark_app
