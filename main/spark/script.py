@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession,DataFrameWriter
 from pyspark.sql import functions as F
-from pyspark.sql.functions import from_json, col, lit, struct
+from pyspark.sql.functions import from_json, col, lit, struct,date_format
 from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
 import math
 import redis
@@ -12,38 +12,34 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 import requests
 import json
+from elasticsearch import Elasticsearch
+import time
 
-'''
+
+
 # Configura l'URL di Elasticsearch
-es_host = "http://localhost:9200"
-index_name = "location-data"
-# Invia una richiesta PUT per creare o aggiornare il mapping
-response = requests.put(
-    f"{es_host}/{index_name}",
-    headers={"Content-Type": "application/json"},
-    data=json.dumps(mapping)
-)
-if response.status_code in [200, 201]:
-    print("Mapping configurato con successo!")
-else:
-    print(f"Errore nella configurazione del mapping: {response.text}")
-
+es_host = "http://157.230.21.212:9200"
+es_index_name = "location-data"
 
 # Definisci il mapping
 mapping = {
     "mappings": {
         "properties": {
-            "timestamp": {"type": "date"},
+            "timestamp": {"type": "date", "format": "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"},
             "location": {"type": "geo_point"}
         }
     }
 }
-'''
+
+es = Elasticsearch(es_host)
+# Inizializza Elasticsearch con il mapping
+if not es.indices.exists(index=es_index_name):
+    es.indices.create(index=es_index_name, body=mapping)
+
 
 load_dotenv()
 
 account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-print("queto è accont_sid",account_sid)
 auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 client = Client(account_sid, auth_token)
 phone_number = os.getenv("PHONE_NUMBER")
@@ -71,15 +67,42 @@ def calculate_direction(history):
     if len(history) < 2:
         return None  # Non è possibile calcolare la direzione con meno di 2 punti
     
-    timestamps = np.array([record[2].timestamp() for record in history]).reshape(-1, 1)
+    model = LinearRegression()
+
+    timestamps = np.array([datetime.strptime(str(record[2]),"%Y-%m-%d %H:%M:%S").timestamp() for record in history]).reshape(-1, 1)
     latitudes = np.array([record[0] for record in history])
     longitudes = np.array([record[1] for record in history])
 
-    lat_reg = LinearRegression().fit(timestamps, latitudes)
-    lon_reg = LinearRegression().fit(timestamps, longitudes)
+    lat_reg = model.fit(timestamps, latitudes)
+    lon_reg = model.fit(timestamps, longitudes)
 
     lat_slope = lat_reg.coef_[0]
     lon_slope = lon_reg.coef_[0]
+
+    print(f"prima della predizione{lat_slope},{lon_slope}")
+
+    predict = model.predict([[lat_reg.coef_[0]],[lon_reg.coef_[0]]])
+
+    print(f"predizione:",predict)
+    angle = math.atan2(predict[0], predict[1])
+    degree = math.degrees(angle)
+    if degree >= -22.5 and degree < 22.5:
+            print("predict north") 
+    elif degree >= 22.5 and degree < 67.5:
+        print("predict northeast") 
+    elif degree >= 67.5 and degree < 112.5:
+        print("predict east") 
+    elif degree >= 112.5 and degree < 157.5:
+        print("predict southeast") 
+    elif degree >= 157.5 or degree < -157.5:
+        print("predict south") 
+    elif degree >= -157.5 and degree < -112.5:
+        print("predict southwest") 
+    elif degree >= -112.5 and degree < -67.5:
+        print("predict west") 
+    elif degree >= -67.5 and degree < -22.5:
+        print("predict northwest") 
+
 
     angle = math.atan2(lon_slope, lat_slope)
     degree = math.degrees(angle)
@@ -103,6 +126,8 @@ def calculate_direction(history):
 
 # Calcolare la distanza e segnalarla se supera i 30 metri
 def process_new_data(input_df, epoch_id):
+    if input_df.isEmpty():
+        return
     schema = StructType().add("latitude", DoubleType()).add("longitude", DoubleType()).add("timestamp", TimestampType())
     
     # Leggere i dati da Redis in un DataFrame separato
@@ -122,33 +147,48 @@ def process_new_data(input_df, epoch_id):
             latitude = info["latitude"]
             longitude = info["longitude"]
             timestamp = info["timestamp"]
-            print(f"Nessuna coordinata iniziale trovata in Redis, dunque salvataggio della coordinata su Redis: {latitude}, {longitude}, {timestamp}")
+            print(f"ho letto {latitude},{longitude},{timestamp}")
+            if latitude is None or longitude is None or timestamp is None: return
             # Creare una chiave unica per ogni coppia di coordinate
             unique_key = f"{latitude}:{longitude}"
+            formatted_timestamp = datetime.fromtimestamp(int(timestamp))
+            print(f"Nessuna coordinata iniziale trovata in Redis, dunque salvataggio della coordinata su Redis: {latitude}, {longitude}, {formatted_timestamp}")
             # Salvare la coordinata su Redis
             redis_client.hset(f"{index}:{unique_key}", mapping={
                 "latitude": latitude,
                 "longitude": longitude,
-                "timestamp": timestamp
+                "timestamp": str(formatted_timestamp)
             })
+            '''
+                        # Creo i dati da mandare ad Elasticsearch
+                        es_df = spark.createDataFrame([
+                                    {
+                                        "timestamp": timestamp,
+                                        "location": {
+                                            "lat": latitude,
+                                            "lon": longitude
+                                        }
+                                    }
+                                ])
 
-            # Creo i dati da mandare ad Elasticsearch
-            es_df = spark.createDataFrame([
-                        {
-                            "timestamp": timestamp,
-                            "location": {
-                                "lat": latitude,
-                                "lon": longitude
-                            }
-                        }
-                    ])
+                        # Invia il DataFrame a Elasticsearch con geo_point mapping
+                        es_df.write.format("org.elasticsearch.spark.sql")\
+                            .option("es.resource", "location-data")\
+                            .option("es.mapping.id", "timestamp") \
+                            .mode("append")\
+                            .save()
+            '''
 
-            # Invia il DataFrame a Elasticsearch con geo_point mapping
-            es_df.write.format("org.elasticsearch.spark.sql")\
-                .option("es.resource", "location-data")\
-                .option("es.mapping.id", "timestamp") \
-                .mode("append")\
-                .save()
+            es_data = {
+                "timestamp" : formatted_timestamp.isoformat() + "Z",
+                "location" : {
+                    "lat" : latitude,
+                    "lon" : longitude
+                }
+            }
+
+            es.index(index=es_index_name, body=es_data, ignore=400)
+
 
         return
     
@@ -185,7 +225,7 @@ def process_new_data(input_df, epoch_id):
             history.append((
                 float(record[1]['latitude']),
                 float(record[1]['longitude']),
-                datetime.fromtimestamp(float(record[1]['timestamp']))
+                str(record[1]['timestamp'])
             ))
 
 # Gestione della coordinata che è arrivata dopo quella iniziale
@@ -195,23 +235,31 @@ def process_new_data(input_df, epoch_id):
         for row in rows:
             latitude = row['latitude']
             longitude = row['longitude']
-            last_timestamp = row['timestamp']
+            unix_timestamp = float(row['timestamp'])
+
+
+            print(f"ho letto {latitude},{longitude},{unix_timestamp}")
+
 
             # Dati delle coordinate iniziali
             first_latitude, first_longitude, first_timestamp = history[0]
+
+            unix_first_timestamp = datetime.strptime(first_timestamp, "%Y-%m-%d %H:%M:%S")
+            unix_first_timestamp = unix_first_timestamp.timestamp()
+
+            print(f"li confronto con {first_latitude},{first_longitude},{unix_first_timestamp}")
             # Misuro la distanza
             distance = haversine(first_latitude, first_longitude, latitude, longitude) 
             print(f"Distanza: {distance} metri")
 
             # Calcolo la velocità
-            date_time_obj = datetime.strptime( str(history[0][2]), '%Y-%m-%d %H:%M:%S')
-            first_time = date_time_obj
-            last_timestamp = datetime.fromtimestamp(float(last_timestamp))
-            time_diff = (last_timestamp - first_time).total_seconds()
+            time_diff = (datetime.fromtimestamp(unix_timestamp) - datetime.fromtimestamp(unix_first_timestamp)).total_seconds()
             speed = distance / time_diff if time_diff > 0 else 0
             print(f"Velocità: {speed} m/s")
 
-            history.append((latitude, longitude, last_timestamp))
+            formatted_timestamp = datetime.fromtimestamp(int(unix_timestamp))
+
+            history.append((latitude, longitude, formatted_timestamp))
 
             # Predizione della direzione
             direction = calculate_direction(history)
@@ -245,7 +293,7 @@ def process_new_data(input_df, epoch_id):
                 redis_client.hset(f"{index}:{unique_key}", mapping={
                     "latitude": latitude,
                     "longitude": longitude,
-                    "timestamp": str(last_timestamp.timestamp())
+                    "timestamp": str(formatted_timestamp)
                 })
 
                 # Se non risultava ancora rubata, indico che lo è salvando l'annotazione stolen su redis
@@ -257,10 +305,10 @@ def process_new_data(input_df, epoch_id):
                     })
 
                 # Invio la posizione anche ad Elasticsearch per aggiornare il puntatore sulla mappa gps
-
+                '''
                 es_df = spark.createDataFrame([
                                 {
-                                    "timestamp": str(last_timestamp.timestamp()),
+                                    "timestamp": formatted_timestamp,
                                     "location": {
                                         "lat": latitude,
                                         "lon": longitude
@@ -273,7 +321,17 @@ def process_new_data(input_df, epoch_id):
                     .option("es.mapping.id", "timestamp") \
                     .mode("append")\
                     .save()
-                
+                ''' 
+                es_data = {
+                    "timestamp" : formatted_timestamp.isoformat() + "Z",
+                    "location" : {
+                        "lat" : latitude,
+                        "lon" : longitude
+                    }
+                }
+
+                es.index(index=es_index_name, body=es_data, ignore=400)
+
                 # Invio ad Elasticsearch anche i dati calcolati in precedenza di velocità e direzione predetta
                 es_df = spark.createDataFrame([
                     {
@@ -327,12 +385,17 @@ df = df.selectExpr("CAST(value AS STRING) as json") \
     .select("data.*") \
     .withColumn("value", F.concat(col("latitude"), lit(","), col("longitude"), lit(","), col("timestamp"))) 
    # .withColumn("timestamp", col("timestamp").cast(TimestampType()))
-
+'''
 # Converti le coordinate in DoubleType per il calcolo della distanza
 df = df.withColumn("latitude", col("latitude").cast(DoubleType())) \
        .withColumn("longitude", col("longitude").cast(DoubleType())) \
-        .withColumn("timestamp" , col("timestamp"))
+       .withColumn("timestamp", col("timestamp").cast("timestamp"))
 
+df = df.withColumn("timestamp", date_format(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSSZ"))
+'''
+df = df.withColumn("latitude", col("latitude").cast(DoubleType())) \
+       .withColumn("longitude", col("longitude").cast(DoubleType())) \
+       .withColumn("timestamp", col("timestamp"))
 # Ogni nuovo dato presente su kafka al topic locations viene processato da process_new_data
 df.writeStream \
     .foreachBatch(process_new_data) \
