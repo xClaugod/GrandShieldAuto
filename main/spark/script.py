@@ -70,15 +70,16 @@ def calculate_direction(history):
     model = LinearRegression()
 
     timestamps = np.array([datetime.strptime(str(record[2]),"%Y-%m-%d %H:%M:%S").timestamp() for record in history]).reshape(-1, 1)
-    latitudes = np.array([record[0] for record in history])
-    longitudes = np.array([record[1] for record in history])
+    latitudes = np.array([record[0] for record in history]).reshape(-1, 1)
+    longitudes = np.array([record[1] for record in history]).reshape(-1, 1)
 
     lat_reg = model.fit(timestamps, latitudes)
     lon_reg = model.fit(timestamps, longitudes)
 
-    lat_slope = lat_reg.coef_[0]
-    lon_slope = lon_reg.coef_[0]
+    lat_slope = lat_reg.coef_[0][0]  # Corrected to access the slope value
+    lon_slope = lon_reg.coef_[0][0]  # Corrected to access the slope value
 
+    '''
     print(f"prima della predizione{lat_slope},{lon_slope}")
 
     predict = model.predict([[lat_reg.coef_[0]],[lon_reg.coef_[0]]])
@@ -102,7 +103,7 @@ def calculate_direction(history):
         print("predict west") 
     elif degree >= -67.5 and degree < -22.5:
         print("predict northwest") 
-
+    '''
 
     angle = math.atan2(lon_slope, lat_slope)
     degree = math.degrees(angle)
