@@ -1,7 +1,7 @@
 #!/bin/bash
 
-latitude=40.741895
-longitude=-73.989308
+latitude=37.57695388793945
+longitude=15.138849258422852
 timestamp=$(date +%s)
 
 while true; do

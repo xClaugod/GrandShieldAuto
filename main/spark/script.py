@@ -20,9 +20,11 @@ import time
 # URL di Elasticsearch
 es_host = "http://157.230.21.212:9200"
 es_index_name = "location-data"
+es_current_location_index = "current-location"
+es_current_stats_index = "current-stats"
 
 # Definizione del mapping
-mapping = {
+mapping_location = {
     "mappings": {
         "properties": {
             "timestamp": {"type": "date", "format": "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"},
@@ -31,10 +33,25 @@ mapping = {
     }
 }
 
+mapping_stats = {
+    "mappings": {
+        "properties": {
+            "timestamp": {"type": "date", "format": "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"},
+            "speed": {"type": "float"},
+            "direction": {"type": "keyword"}
+        }
+    }
+}
+
 es = Elasticsearch(es_host)
+
 # Inizializzazione Elasticsearch con il mapping
 if not es.indices.exists(index=es_index_name):
-    es.indices.create(index=es_index_name, body=mapping)
+    es.indices.create(index=es_index_name, body=mapping_location)
+if not es.indices.exists(index=es_current_location_index):
+    es.indices.create(index=es_current_location_index, body=mapping_location)
+if not es.indices.exists(index=es_current_stats_index):
+    es.indices.create(index=es_current_stats_index, body=mapping_stats)
 
 
 load_dotenv()
@@ -46,6 +63,9 @@ client = Client(account_sid, auth_token)
 phone_number = os.getenv("PHONE_NUMBER")
 twilio_number = os.getenv("TWILIO_NUMBER")
 
+# Funzione per aggiornare l'indice corrente
+def update_elastic_data(es, index, data, id):
+    es.index(index=index, id=id, body=data)
 
 # Funzione per calcolare la distanza tra due punti GPS usando la formula dell'haversine
 def haversine(lat1, lon1, lat2, lon2):
@@ -61,6 +81,10 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     return R * c
+
+def mps_to_kmph(mps):
+    kmph = mps * 3.6
+    return kmph
 
 # Funzione per calcolare la direzione basata su regressione lineare
 def calculate_direction(history):
@@ -83,21 +107,21 @@ def calculate_direction(history):
     degree = math.degrees(angle)
 
     if degree >= -22.5 and degree < 22.5:
-        return 'north'
+        return 'N'
     elif degree >= 22.5 and degree < 67.5:
-        return 'northeast'
+        return 'NE'
     elif degree >= 67.5 and degree < 112.5:
-        return 'east'
+        return 'E'
     elif degree >= 112.5 and degree < 157.5:
-        return 'southeast'
+        return 'SE'
     elif degree >= 157.5 or degree < -157.5:
-        return 'south'
+        return 'S'
     elif degree >= -157.5 and degree < -112.5:
-        return 'southwest'
+        return 'SW'
     elif degree >= -112.5 and degree < -67.5:
-        return 'west'
+        return 'W'
     elif degree >= -67.5 and degree < -22.5:
-        return 'northwest'
+        return 'NW'
 
 # Studio della nuovo posizione segnalata
 def process_new_data(input_df, epoch_id):
@@ -146,15 +170,18 @@ def process_new_data(input_df, epoch_id):
                     "lon" : longitude
                 }
             }
-            actions = [{
-                "_index": es_index_name,
-                "_source": es_data
-            }]
-            try:
-                helpers.bulk(es, actions)
-            except BulkIndexError as e:
-                for error in e.errors:
-                    print(f"Error indexing document: {error}")
+
+            update_elastic_data(es, es_index_name, es_data, 1)
+            update_elastic_data(es, es_current_location_index, es_data, 2)
+            # Invio la velocità e direzione ad Elasticsearch
+            es_data_stats = {
+                "timestamp": formatted_timestamp,
+                "speed": 0,
+                "direction": "N",
+                "stolen": False
+            }
+            update_elastic_data(es, es_current_stats_index, es_data_stats, 3)
+
         return
 
     # Variabile d'appoggio che si aggiorna quando la macchina risulta in movimento (quindi rubata)
@@ -221,7 +248,8 @@ def process_new_data(input_df, epoch_id):
             # Calcolo la velocità
             time_diff = (datetime.fromtimestamp(unix_timestamp) - datetime.fromtimestamp(unix_first_timestamp)).total_seconds()
             speed = distance / time_diff if time_diff > 0 else 0
-            print(f"Velocità: {speed} m/s")
+            speed_kmh = mps_to_kmph(speed)
+            print(f"Velocità: {speed_kmh} km/h")
 
             formatted_timestamp = datetime.fromtimestamp(unix_timestamp).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
@@ -270,7 +298,6 @@ def process_new_data(input_df, epoch_id):
                         "stolen": "True",
                     })
 
-                # Invio la posizione anche ad Elasticsearch per aggiornare il puntatore sulla mappa gps
                 es_data = {
                     "timestamp" : formatted_timestamp,
                     "location" : {
@@ -278,26 +305,18 @@ def process_new_data(input_df, epoch_id):
                         "lon" : longitude
                     }
                 }
-                actions = [{
-                    "_index": es_index_name,
-                    "_source": es_data
-                }]
-                try:
-                    helpers.bulk(es, actions)
-                except BulkIndexError as e:
-                    for error in e.errors:
-                        print(f"Error indexing document: {error}")
 
-                # Invio ad Elasticsearch anche i dati calcolati in precedenza di velocità e direzione predetta
+                update_elastic_data(es, es_current_location_index, es_data, 2)
+
+                # Invio la velocità e direzione ad Elasticsearch
                 es_data_stats = {
-                    "speed": speed,
-                    "direction": direction
+                    "timestamp": formatted_timestamp,
+                    "speed": speed_kmh,
+                    "direction": direction,
+                    "stolen": stolen
                 }
-                actions_stats = [{
-                    "_index": "location-data-stats",
-                    "_source": es_data_stats
-                }]
-            #    helpers.bulk(es, actions_stats)
+                update_elastic_data(es, es_current_stats_index, es_data_stats, 3)
+
                 index += 1
     else:
         print("Nessuna coordinata trovata nel batch")
@@ -336,22 +355,14 @@ df = df.selectExpr("CAST(value AS STRING) as json") \
     .select(from_json(col("json"), schema).alias("data")) \
     .select("data.*") \
     .withColumn("value", F.concat(col("latitude"), lit(","), col("longitude"), lit(","), col("timestamp"))) 
-   # .withColumn("timestamp", col("timestamp").cast(TimestampType()))
-'''
-# Converti le coordinate in DoubleType per il calcolo della distanza
-df = df.withColumn("latitude", col("latitude").cast(DoubleType())) \
-       .withColumn("longitude", col("longitude").cast(DoubleType())) \
-       .withColumn("timestamp", col("timestamp").cast("timestamp"))
 
-df = df.withColumn("timestamp", date_format(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSSZ"))
-'''
 df = df.withColumn("latitude", col("latitude").cast(DoubleType())) \
        .withColumn("longitude", col("longitude").cast(DoubleType())) \
        .withColumn("timestamp", col("timestamp"))
+
 # Ogni nuovo dato presente su kafka al topic locations viene processato da process_new_data
 df.writeStream \
     .foreachBatch(process_new_data) \
     .start()
-
 
 spark.streams.awaitAnyTermination()

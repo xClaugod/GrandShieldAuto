@@ -88,6 +88,7 @@ services:
     depends_on:
       - elasticsearch
 
+
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     ports:
