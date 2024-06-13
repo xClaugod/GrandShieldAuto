@@ -22,7 +22,7 @@ es_index_name = "first-location"
 es_current_location_index = "current-location"
 es_current_stats_index = "current-stats"
 
-# Definizione del mapping
+# ES Mapping config to handle map data
 mapping_location = {
     "mappings": {
         "properties": {
@@ -32,6 +32,7 @@ mapping_location = {
     }
 }
 
+# ES Mapping config to handle stats data
 mapping_stats = {
     "mappings": {
         "properties": {
@@ -44,7 +45,7 @@ mapping_stats = {
 
 es = Elasticsearch(es_host)
 
-# Inizializzazione Elasticsearch con il mapping
+# Elasticsearch Initialization with mapping
 if not es.indices.exists(index=es_index_name):
     es.indices.create(index=es_index_name, body=mapping_location)
 if not es.indices.exists(index=es_current_location_index):
@@ -54,18 +55,18 @@ if not es.indices.exists(index=es_current_stats_index):
 
 
 
-# Caricamento dati per effettuare la chiamata con Twilio
+# Loading data to use TWILIO
 account_sid = os.getenv("TWILIO_ACCOUNT_SID")
 auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 client = Client(account_sid, auth_token)
 phone_number = os.getenv("PHONE_NUMBER")
 twilio_number = os.getenv("TWILIO_NUMBER")
 
-# Funzione per aggiornare l'indice corrente
+# Update current index
 def update_elastic_data(es, index, data, id):
     es.index(index=index, id=id, body=data)
 
-# Funzione per calcolare la distanza tra due punti GPS usando la formula dell'haversine
+# Haversine function to evaluate distance between 2 geo point
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000  # raggio della Terra in metri
     phi1 = math.radians(lat1)
@@ -80,17 +81,19 @@ def haversine(lat1, lon1, lat2, lon2):
 
     return R * c
 
+# Function to convert m/ps to km/ph
 def mps_to_kmph(mps):
     kmph = mps * 3.6
     return kmph
 
-# Funzione per calcolare la direzione basata su regressione lineare
+# Linear regression to predict car direction
 def calculate_direction(history):
     if len(history) < 2:
-        return None  # Non è possibile calcolare la direzione con meno di 2 punti
+        return None  # Linear Regression need at least 2 point
     
     model = LinearRegression()
 
+    # Taking data saved into "history"
     timestamps = np.array([datetime.strptime(str(record[2]),"%Y-%m-%dT%H:%M:%S.%fZ").timestamp() for record in history]).reshape(-1, 1)
     latitudes = np.array([record[0] for record in history]).reshape(-1, 1)
     longitudes = np.array([record[1] for record in history]).reshape(-1, 1)
@@ -121,24 +124,19 @@ def calculate_direction(history):
     elif degree >= -67.5 and degree < -22.5:
         return 'NW'
 
-# Studio della nuovo posizione segnalata
+# New position trigger
 def process_new_data(input_df, epoch_id):
     if input_df.isEmpty():
         return
     
+    # Schema definition for redis data
     schema = StructType().add("latitude", DoubleType()).add("longitude", DoubleType()).add("timestamp", TimestampType())
 
-    # Leggere i dati da Redis in un DataFrame separato
-    redis_df = spark.read \
-        .format("org.apache.spark.sql.redis") \
-        .option("table", "*") \
-        .schema(schema) \
-        .load()
+    index = len(redis_client.keys("*"))
+
+    print(f"countIndex: {index}")
     
-    # Conto gli elementi salvati
-    index = redis_df.count()
-    
-    # Se non ho nulla vorrà dire che sto processando la coordinata della posizione iniziale
+    # If there are 0 elements we are evaluating first position
     if index == 0:
         if not input_df.isEmpty():
             info = input_df.select("latitude", "longitude", "timestamp").first()
@@ -147,12 +145,12 @@ def process_new_data(input_df, epoch_id):
             timestamp = info["timestamp"]
             print(f"ho letto {latitude},{longitude},{timestamp}")
             if latitude is None or longitude is None or timestamp is None: return
-            # Creare una chiave unica per ogni coppia di coordinate
+            # Creating unique key to save data into redis
             unique_key = f"{latitude}:{longitude}"
-            # Formatto la data
+            # Data formatting
             formatted_timestamp = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
             print(f"Nessuna coordinata iniziale trovata in Redis, dunque salvataggio della coordinata su Redis: {latitude}, {longitude}, {formatted_timestamp}")
-            # Salvare la coordinata su Redis
+            # Storing into redis
             redis_client.hset(f"{index}:{unique_key}", mapping={
                 "latitude": latitude,
                 "longitude": longitude,
@@ -160,7 +158,7 @@ def process_new_data(input_df, epoch_id):
             })
 
 
-            # Invio dei dati ad Elasticsearch
+            # Formatting map data to Elasticsearch
             es_data = {
                 "timestamp" : formatted_timestamp,
                 "location" : {
@@ -169,55 +167,61 @@ def process_new_data(input_df, epoch_id):
                 }
             }
 
+            # Sending data to Elasticsearch
             update_elastic_data(es, es_index_name, es_data, 1)
             update_elastic_data(es, es_current_location_index, es_data, 2)
-            # Invio la velocità e direzione ad Elasticsearch
+
+            # Formatting stats data to Elasticsearch
             es_data_stats = {
                 "timestamp": formatted_timestamp,
                 "speed": 0,
                 "direction": "N",
                 "stolen": False
             }
+
+            # Sending data to Elasticsearch
             update_elastic_data(es, es_current_stats_index, es_data_stats, 3)
 
         return
 
-    # Variabile d'appoggio che si aggiorna quando la macchina risulta in movimento (quindi rubata)
+    # Boolean variable which represent car status. It will be true if car is moving (so it's stolen)
     stolen = False
 
-    # Verifico se la macchina era in movimento cercando stolen su redis
+    # Retrieving car status from redis 
     all_keys = redis_client.keys("*")
     for key in all_keys: 
-        # Se trovo salvato in redis "stolen" allora la segnalazione era stata già effettuata
+        # if "stolen" row is find
         if key.decode('utf-8').startswith("stolen"): 
             stolen = True 
 
-    # Verifico se già ho effettuato la chiamata all'utente cercando called su redis
+    # Retrieving row "called" from redis to know if user's phone had beeing called
     called = False
     all_keys = redis_client.keys("*")
     for key in all_keys: 
         if key.decode('utf-8').startswith("called"):
             called = True
 
-    # Estraggo la prima coordinata gps mandata dall'auto (posizione del parcheggio)
+    # Taking all coordinates send by car. First one will represent parking location
     all_keys = redis_client.keys("*")
     numeric_keys = sorted([key for key in all_keys if re.match(r"^[0-9]+:", key.decode('utf-8'))], key=lambda x: int(x.decode('utf-8').split(':')[0]))
-
     matching_hashes = []
     for key in numeric_keys:
         key_str = key.decode('utf-8')
-        # Controlla se la chiave inizia con il prefisso desiderato
+        # Check if key starts with a number (don't look for "stolen" and "called" rows)
         if re.match(r"^[0-9]", key_str):
-            # Recupera tutti i campi e valori dell'hash
+            # Retrieving data
             hash_values = redis_client.hgetall(key)
-            # Converti i valori da byte a stringa
+            # From byte to string
             decoded_values = {k.decode('utf-8'): v.decode('utf-8') for k, v in hash_values.items()}
             matching_hashes.append((key.decode('utf-8'), decoded_values))
+
+    # Index value will be used to take last known coordinate and evaluate distance,speed matching with processed coordinate
     index = 0
+
+    # All the coordinates will be saved into a "history" vector
     if matching_hashes:
         history = []
         for record in matching_hashes:
-            print(f"history->{record[1]['latitude']}")
             index+=1
             history.append((
                 float(record[1]['latitude']),
@@ -226,52 +230,50 @@ def process_new_data(input_df, epoch_id):
             ))
 
 
-    # Gestione del flusso di coordinate arrivate dopo quella iniziale
+    # Evaluating and comparison between first,last coordinate and the processed one
+    # First coordinate will be used to evaluate if car is moving (distance)
+    # Last coordinate will be used to evaluate car speed
 
     rows = input_df.select("latitude", "longitude", "timestamp").collect()
     if rows:
         for row in rows:
+
+            # Processing data
             latitude = row['latitude']
             longitude = row['longitude']
             unix_timestamp = float(row['timestamp'])
 
-
-            print(f"ho letto {latitude},{longitude},{unix_timestamp}")
-
-            # Dati delle coordinate iniziali
+            # First coordinates
             first_latitude, first_longitude, first_timestamp = history[0]
-
             unix_first_timestamp = datetime.strptime(first_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
             unix_first_timestamp = unix_first_timestamp.timestamp()
 
-            print(f"li confronto con {first_latitude},{first_longitude},{unix_first_timestamp}")
-            # Misuro la distanza
+            # Distance evaluation
             distance = haversine(first_latitude, first_longitude, latitude, longitude) 
-            print(f"Distanza: {distance} metri")
-            print(f"index da cui attingere: {index-1}")
+
+            print(f"Distance: {distance} m")
+
+            # Last saved coordinates
             last_latitude,last_longitude,last_timestamp = history[index-1]
             unix_last_timestamp = datetime.strptime(last_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
             unix_last_timestamp = unix_last_timestamp.timestamp()
-            print(f"porova: {last_latitude},{last_longitude},{last_timestamp}")
 
-            # Calcolo la velocità
+            # Speed evaluation
             time_diff = (datetime.fromtimestamp(unix_timestamp) - datetime.fromtimestamp(unix_last_timestamp)).total_seconds()
             speed = distance / time_diff if time_diff > 0 else 0
             speed_kmh = mps_to_kmph(speed)
-            print(f"Velocità: {speed_kmh} km/h")
+            print(f"Speed: {speed_kmh} km/h")
 
             formatted_timestamp = datetime.fromtimestamp(unix_timestamp).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
+            # Update history
             history.append((latitude, longitude, formatted_timestamp))
 
-            # Predizione della direzione
+            # Predicting direction
             direction = calculate_direction(history)
-            print(f"Direzione: {direction}")
+            print(f"Direction: {direction}")
 
-            # Se la distanza supera i 30 metri o se la macchina risulta già rubata, aggiorno la posizione della mappa
-            # ed effettuo la chiamata all'utente nel caso in cui non l'avessi già fatta
-            print(f"stolen risulta: {stolen}")
-             # Salvo la nuova posizione su redis
+             # Storing new coordinate into redis
             print(f"Salvataggio della coordinata su Redis: {latitude}, {longitude}")
             
             unique_key = f"{latitude}:{longitude}"
@@ -282,6 +284,7 @@ def process_new_data(input_df, epoch_id):
                 "timestamp": str(formatted_timestamp)
             })
 
+            # Sending new coordinate to Elasticsearch
             es_data = {
                     "timestamp" : formatted_timestamp,
                     "location" : {
@@ -292,7 +295,7 @@ def process_new_data(input_df, epoch_id):
 
             update_elastic_data(es, es_current_location_index, es_data, 2)
 
-            # Invio la velocità e direzione ad Elasticsearch
+            # Sending updated speed and direction to Elasticsearch
             es_data_stats = {
                 "timestamp": formatted_timestamp,
                 "speed": speed_kmh,
@@ -300,11 +303,15 @@ def process_new_data(input_df, epoch_id):
                 "stolen": stolen
             }
             update_elastic_data(es, es_current_stats_index, es_data_stats, 3)
+
             index += 1
 
+            # Check to alert user
             if distance > 30 or stolen == True:
+
+                # if call hasn't been taken already
                 if not called :
-                    # Chiamata
+                    # Call user
                     call = client.calls.create(
                     url="http://demo.twilio.com/docs/voice.xml",
                     to= phone_number,
@@ -313,14 +320,14 @@ def process_new_data(input_df, epoch_id):
 
                     print("call info:",call)
                                         
-                    # Conservo su redis l'annotazione per aver effettuato la chiamata
+                    # Storing into redis call action
                     unique_key = "called"
                     redis_client.hset(unique_key, mapping={
                         "called": "True",
                     })
 
                
-                # Se non risultava ancora rubata, indico che lo è salvando l'annotazione stolen su redis
+                # If car was not already stolen, storing steal action into redis
                 if not stolen:
                     unique_key = "stolen"
                     
@@ -329,33 +336,31 @@ def process_new_data(input_df, epoch_id):
                     })
 
     else:
-        print("Nessuna coordinata trovata nel batch")
+        print("Batch contain no coordinates")
 
 
-# Creare una sessione Spark con le configurazioni per Redis
+# Spark session with redis config
 spark = SparkSession.builder \
     .appName("KafkaSparkStreaming") \
-    .config("spark.redis.host", "redis-host") \
-    .config("spark.redis.port", "6379") \
     .getOrCreate()
 
-# Configurazione del client Redis in Python
+# Redis client config
 redis_client = redis.StrictRedis(host='redis-host', port=6379, db=0)
 
-
+# Subscribing spark to kafka topic "locations"
 df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "kafka:9092") \
     .option("subscribe", "locations") \
     .load()
 
-# Schema dei dati
+# Kafka data schema
 schema = StructType() \
     .add("latitude", StringType()) \
     .add("longitude", StringType()) \
     .add("timestamp", StringType())
 
-# Trasformare i dati
+# Casting data
 df = df.selectExpr("CAST(value AS STRING) as json") \
     .select(from_json(col("json"), schema).alias("data")) \
     .select("data.*") \
@@ -365,7 +370,7 @@ df = df.withColumn("latitude", col("latitude").cast(DoubleType())) \
        .withColumn("longitude", col("longitude").cast(DoubleType())) \
        .withColumn("timestamp", col("timestamp"))
 
-# Ogni nuovo dato presente su kafka al topic locations viene processato da process_new_data
+# When a new data comes into kafka location topic it will be processed by process_new_data
 df.writeStream \
     .foreachBatch(process_new_data) \
     .start()
