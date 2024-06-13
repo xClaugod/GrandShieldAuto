@@ -4,22 +4,21 @@ from pyspark.sql.functions import from_json, col, lit
 from pyspark.sql.types import StructType, StringType, DoubleType, TimestampType
 from twilio.rest import Client
 from sklearn.linear_model import LinearRegression
-from elasticsearch import Elasticsearch, helpers
-from elasticsearch.helpers import BulkIndexError
+from elasticsearch import Elasticsearch
 from dotenv import load_dotenv
 from datetime import datetime
 import numpy as np
 import math
 import redis
 import os
-import requests
-import json
-import time
+import re
 
+
+load_dotenv()
 
 # URL di Elasticsearch
 es_host = "http://157.230.21.212:9200"
-es_index_name = "location-data"
+es_index_name = "first-location"
 es_current_location_index = "current-location"
 es_current_stats_index = "current-stats"
 
@@ -54,7 +53,6 @@ if not es.indices.exists(index=es_current_stats_index):
     es.indices.create(index=es_current_stats_index, body=mapping_stats)
 
 
-load_dotenv()
 
 # Caricamento dati per effettuare la chiamata con Twilio
 account_sid = os.getenv("TWILIO_ACCOUNT_SID")
@@ -203,24 +201,30 @@ def process_new_data(input_df, epoch_id):
 
     # Estraggo la prima coordinata gps mandata dall'auto (posizione del parcheggio)
     all_keys = redis_client.keys("*")
+    numeric_keys = sorted([key for key in all_keys if re.match(r"^[0-9]+:", key.decode('utf-8'))], key=lambda x: int(x.decode('utf-8').split(':')[0]))
+
     matching_hashes = []
-    for key in all_keys:
+    for key in numeric_keys:
+        key_str = key.decode('utf-8')
         # Controlla se la chiave inizia con il prefisso desiderato
-        if key.decode('utf-8').startswith("0:"):
+        if re.match(r"^[0-9]", key_str):
             # Recupera tutti i campi e valori dell'hash
             hash_values = redis_client.hgetall(key)
             # Converti i valori da byte a stringa
             decoded_values = {k.decode('utf-8'): v.decode('utf-8') for k, v in hash_values.items()}
             matching_hashes.append((key.decode('utf-8'), decoded_values))
-    
+    index = 0
     if matching_hashes:
         history = []
         for record in matching_hashes:
+            print(f"history->{record[1]['latitude']}")
+            index+=1
             history.append((
                 float(record[1]['latitude']),
                 float(record[1]['longitude']),
                 str(record[1]['timestamp'])
             ))
+
 
     # Gestione del flusso di coordinate arrivate dopo quella iniziale
 
@@ -244,9 +248,14 @@ def process_new_data(input_df, epoch_id):
             # Misuro la distanza
             distance = haversine(first_latitude, first_longitude, latitude, longitude) 
             print(f"Distanza: {distance} metri")
+            print(f"index da cui attingere: {index-1}")
+            last_latitude,last_longitude,last_timestamp = history[index-1]
+            unix_last_timestamp = datetime.strptime(last_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+            unix_last_timestamp = unix_last_timestamp.timestamp()
+            print(f"porova: {last_latitude},{last_longitude},{last_timestamp}")
 
             # Calcolo la velocità
-            time_diff = (datetime.fromtimestamp(unix_timestamp) - datetime.fromtimestamp(unix_first_timestamp)).total_seconds()
+            time_diff = (datetime.fromtimestamp(unix_timestamp) - datetime.fromtimestamp(unix_last_timestamp)).total_seconds()
             speed = distance / time_diff if time_diff > 0 else 0
             speed_kmh = mps_to_kmph(speed)
             print(f"Velocità: {speed_kmh} km/h")
@@ -262,6 +271,37 @@ def process_new_data(input_df, epoch_id):
             # Se la distanza supera i 30 metri o se la macchina risulta già rubata, aggiorno la posizione della mappa
             # ed effettuo la chiamata all'utente nel caso in cui non l'avessi già fatta
             print(f"stolen risulta: {stolen}")
+             # Salvo la nuova posizione su redis
+            print(f"Salvataggio della coordinata su Redis: {latitude}, {longitude}")
+            
+            unique_key = f"{latitude}:{longitude}"
+            
+            redis_client.hset(f"{index}:{unique_key}", mapping={
+                "latitude": latitude,
+                "longitude": longitude,
+                "timestamp": str(formatted_timestamp)
+            })
+
+            es_data = {
+                    "timestamp" : formatted_timestamp,
+                    "location" : {
+                        "lat" : latitude,
+                        "lon" : longitude
+                    }
+                }
+
+            update_elastic_data(es, es_current_location_index, es_data, 2)
+
+            # Invio la velocità e direzione ad Elasticsearch
+            es_data_stats = {
+                "timestamp": formatted_timestamp,
+                "speed": speed_kmh,
+                "direction": direction,
+                "stolen": stolen
+            }
+            update_elastic_data(es, es_current_stats_index, es_data_stats, 3)
+            index += 1
+
             if distance > 30 or stolen == True:
                 if not called :
                     # Chiamata
@@ -279,17 +319,7 @@ def process_new_data(input_df, epoch_id):
                         "called": "True",
                     })
 
-                # Salvo la nuova posizione su redis
-                print(f"Salvataggio della coordinata su Redis: {latitude}, {longitude}")
-                
-                unique_key = f"{latitude}:{longitude}"
-                
-                redis_client.hset(f"{index}:{unique_key}", mapping={
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "timestamp": str(formatted_timestamp)
-                })
-
+               
                 # Se non risultava ancora rubata, indico che lo è salvando l'annotazione stolen su redis
                 if not stolen:
                     unique_key = "stolen"
@@ -298,26 +328,6 @@ def process_new_data(input_df, epoch_id):
                         "stolen": "True",
                     })
 
-                es_data = {
-                    "timestamp" : formatted_timestamp,
-                    "location" : {
-                        "lat" : latitude,
-                        "lon" : longitude
-                    }
-                }
-
-                update_elastic_data(es, es_current_location_index, es_data, 2)
-
-                # Invio la velocità e direzione ad Elasticsearch
-                es_data_stats = {
-                    "timestamp": formatted_timestamp,
-                    "speed": speed_kmh,
-                    "direction": direction,
-                    "stolen": stolen
-                }
-                update_elastic_data(es, es_current_stats_index, es_data_stats, 3)
-
-                index += 1
     else:
         print("Nessuna coordinata trovata nel batch")
 
@@ -327,11 +337,6 @@ spark = SparkSession.builder \
     .appName("KafkaSparkStreaming") \
     .config("spark.redis.host", "redis-host") \
     .config("spark.redis.port", "6379") \
-    .config("es.nodes", "157.230.21.212") \
-    .config("es.port", "9200") \
-    .config("es.index.auto.create", "true") \
-    .config("es.net.ssl", "false") \
-    .config("es.nodes.wan.only", "true") \
     .getOrCreate()
 
 # Configurazione del client Redis in Python
