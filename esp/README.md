@@ -1,10 +1,7 @@
 # Grand Shield Auto CAR - ESP
 
 <p align="center">
-<picture>
- <source width="500" height="200" media="(prefers-color-scheme: dark)"  srcset="https://i.postimg.cc/9F6hcmbc/logo.png">
- <img width="500" height="375" alt="Shows logo with black blackground in white theme" src="https://i.postimg.cc/9F6hcmbc/logo.png">
-</picture>
+ <img width="860" height="482" src="https://i.postimg.cc/9F6hcmbc/logo.png">
 </p>
   
 ## Technologies
