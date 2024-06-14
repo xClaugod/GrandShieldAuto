@@ -27,7 +27,10 @@ Plug your pc and esp32 within the UART port
 ## Launch app
 
 - Build main.c file under src folder
-- Upload
+- Upload to esp
+
+###IMPORTANT
+If you have a different esp from ESP32-S3-WROOM-1, please change platform.ini which is the platform configuration file!
 
 That's it.
 Welcome to GSA!
