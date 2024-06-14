@@ -1,9 +1,7 @@
 # Grand Shield Auto CAR - MAIN
 
 <p align="center">
-<picture>
  <img width="860" height="482" src="https://i.postimg.cc/9F6hcmbc/logo.png">
-</picture>
 </p>
   
 ## Technologies
