@@ -1,8 +1,6 @@
 # Grand Shield Auto CAR
 
-<picture>
  <img width="860" height="482" src="https://i.postimg.cc/9F6hcmbc/logo.png">
-</picture>
 
 ## Introduction
 Hey visitors🚶‍♀️🚶‍♂️, welcome to GSA🧙‍♂️!
