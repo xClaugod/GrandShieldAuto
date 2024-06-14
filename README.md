@@ -5,8 +5,8 @@
 ## Introduction
 Hey visitors🚶‍♀️🚶‍♂️, welcome to GSA🧙‍♂️!
 I hope someone never stole your car. By the way, GSA is an app that allows you to sleep peacefully.
-When you left the car, activate our device and go wherever you want. At any time you can watch realtime car position within a map. If, unfortunately, your car is getting stolen our device calls you and you can monitor his movements. GSA monitor car speed,location and predict his direction! 🤩🤩🤩
-So, what you are waiting for? Join to our family 🚗🔒
+When you left the car, activate our device and go wherever you want. At any time you can watch realtime car position within a map. If, unfortunately, your car is getting stolen our device will call you so you can monitor his movements. GSA is able to monitor car speed,location and predict his direction! 🤩🤩🤩
+So, what you are waiting for? Join our family 🚗🔒
 
 This repo contains 2 folder:
 - main, which contains the code to build and deploy the data pipeline 
