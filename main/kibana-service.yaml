@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.34.0 (cbf2835db)
+  labels:
+    io.kompose.service: kibana
+  name: kibana
+spec:
+  type: LoadBalancer  
+  selector:
+    io.kompose.service: kibana
+  ports:
+  - protocol: TCP
+    port: 5601
+    targetPort: 5601

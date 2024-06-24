@@ -35,6 +35,8 @@ services:
     depends_on:
       - zookeeper
     entrypoint: [ '/bin/bash', '-c' ]
+    ports:
+      - 8081:8081
     command: |
       "
       kafka-topics --bootstrap-server PLAINTEXT://kafka:9092 --list
